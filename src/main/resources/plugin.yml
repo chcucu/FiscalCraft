@@ -1,0 +1,51 @@
+name: FiscalCraft
+version: 1.0.0
+main: com.fiscalcraft.FiscalCraftPlugin
+api-version: '1.21'
+authors: [FiscalCraft]
+description: 银行 / 税收 / 贷款 / 风控一体化经济系统
+depend: [Vault]
+softdepend: [Essentials, LuckPerms]
+
+commands:
+  bank:
+    description: FiscalCraft 银行终端指令
+    usage: /bank help
+    aliases: [fc]
+    permission: fiscalcraft.use
+
+permissions:
+  fiscalcraft.use:
+    description: 允许使用银行基础功能
+    default: true
+  fiscalcraft.admin:
+    description: 银行管理员总权限
+    default: op
+    children:
+      fiscalcraft.admin.report: true
+      fiscalcraft.admin.terminal: true
+      fiscalcraft.admin.backup: true
+      fiscalcraft.admin.loan: true
+      fiscalcraft.admin.audit: true
+      fiscalcraft.admin.unlock: true
+  fiscalcraft.admin.report:
+    description: 查看货币供应与财政报表
+    default: op
+  fiscalcraft.admin.terminal:
+    description: 创建/移除银行终端
+    default: op
+  fiscalcraft.admin.backup:
+    description: 手动备份与校验
+    default: op
+  fiscalcraft.admin.loan:
+    description: 贷款管理
+    default: op
+  fiscalcraft.admin.audit:
+    description: 查看全量审计流水
+    default: op
+  fiscalcraft.admin.unlock:
+    description: 解除密码锁定
+    default: op
+  fiscalcraft.pay:
+    description: 使用远程银行转账 /pay
+    default: true

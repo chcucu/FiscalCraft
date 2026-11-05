@@ -1,0 +1,255 @@
+# ============================================================
+# FiscalCraft 1.0.0 配置文件
+# 金额单位一律为“元”（支持两位小数），插件内部转换为 long 分币。
+# 百分比字段直接写百分数，例如 0.025 表示 0.025%。
+# 修改后需重启服务器生效（配置为运行期只读，避免经济参数热改导致账目不一致）。
+# ============================================================
+
+currency-symbol: "$"
+timezone: "Asia/Shanghai"
+
+# ------------------------------------------------------------
+# 存储
+# SQLite(WAL) 为默认，单写者；MySQL 可选。Vault 钱包始终是唯一货币底座。
+# ------------------------------------------------------------
+storage:
+  type: sqlite            # sqlite / mysql
+  sqlite:
+    file: fiscalcraft.db
+  mysql:
+    host: 127.0.0.1
+    port: 3306
+    database: fiscalcraft
+    username: fiscalcraft
+    password: ""
+    use-ssl: false
+
+# ------------------------------------------------------------
+# 费用（从 Vault 钱包扣除，进入 system.treasury 财政池）
+# ------------------------------------------------------------
+fees:
+  open-account: 500        # 开户费
+  card-issue: 800          # 办卡基础费（另加等级工本费）
+  card-reissue: 200        # 补办费
+  shared-create: 500       # 共享账户创建费
+  password-reset: 200      # 密保重置密码费
+
+# ------------------------------------------------------------
+# 存款利息：每日 00:00 结算，个人账户按等级加成，共享账户按基础利率
+# 0.025%/日 = 每日 0.025%
+# ------------------------------------------------------------
+interest:
+  daily-percent: 0.025
+
+# ------------------------------------------------------------
+# 财富税：每日 00:00 快照
+# 税基 = max(0, 钱包 + 银行 + 共享均摊份额 − 未还贷款本金)
+# 关联账号先合并总额再判断起征点，避免小号拆分免税。
+# ------------------------------------------------------------
+wealth-tax:
+  enabled: true
+  threshold: 50000         # 起征点
+  daily-percent: 0.02      # 超过起征点部分每日税率
+
+# ------------------------------------------------------------
+# 个人所得税：仅对银行体系内“当日收款 − 当日付款”净额计征
+# 存款、取款、利息、贷款本金、还本金不计个税。
+# 分档为累进：up-to 为累计上限，-1 表示无上限。
+# ------------------------------------------------------------
+income-tax:
+  free: 500                # 0~500 免税
+  brackets:
+    - up-to: 500
+      rate-percent: 0
+    - up-to: 5000
+      rate-percent: 0.5
+    - up-to: 20000
+      rate-percent: 1.0
+    - up-to: -1
+      rate-percent: 1.5
+
+tax:
+  arrears-lock-days: 7     # 欠税满 N 天锁定共享账户功能
+
+# ------------------------------------------------------------
+# 安全 / KYC
+# 密码只允许在聊天框输入，事件被取消：不广播、不进频道、不写日志。
+# bcrypt + 每账号独立随机盐。
+# ------------------------------------------------------------
+security:
+  pin-length: 6
+  fail-limit: 5            # 单账号错误次数
+  lock-minutes: 10         # 单账号锁定时间
+  ip-limit: 5              # 单 IP 窗口内最多尝试次数
+  ip-window-minutes: 10
+  prompt-timeout-seconds: 120
+
+# ------------------------------------------------------------
+# 转账限额
+# 远程 /pay 与银行终端共用日累计重置时间：每日 00:00。
+# 终端单笔限额还受账户等级影响（见 levels）。
+# 红线：远程限额、税率、授信倍数任何等级都不得放开。
+# ------------------------------------------------------------
+transfer:
+  remote-single-limit: 2000
+  remote-daily-limit: 5000
+  terminal-daily-limit: 20000
+
+# ------------------------------------------------------------
+# 银行卡 / 共享账户
+# ------------------------------------------------------------
+cards:
+  max-per-player: 5
+shared:
+  max-members: 5
+  max-per-player: 3
+
+# ------------------------------------------------------------
+# 关联账号识别：同 IP + 资金往来图聚类（不使用设备指纹）
+# 关联只作观察标记，连续 7 天正常交易自动解除。
+# ------------------------------------------------------------
+relation:
+  enabled: true
+  ip-window-days: 7
+  edge-window-days: 7
+  edge-min-count: 2        # 两账号转账达到 N 次才建立资金边
+
+# ------------------------------------------------------------
+# 风控 / 反洗钱
+# 单笔超过终端限额的 large-alert-ratio 比例写入 suspicious_log。
+# 中风险大额转账需 /bank confirm 二次确认。
+# ------------------------------------------------------------
+risk:
+  medium-confirm-threshold: 5000
+  high-flag-count: 2
+  large-alert-ratio: 0.8
+  flag-expire-days: 7
+
+# ------------------------------------------------------------
+# 贷款与征信
+# 授信上限 = min(single-max, 最近 avg-window-days 日均银行余额 × credit-multiplier)
+# 资金池参考存款准备金：pool-max 与 daily-disbursement 双重限制。
+# terms 为“期限天数: 日利率(%)”。
+# ------------------------------------------------------------
+loan:
+  enabled: true
+  min-account-age-hours: 48
+  min-credit-score: 650
+  avg-window-days: 14
+  single-max: 10000
+  credit-multiplier: 3
+  reserve-ratio: 0.20
+  pool-max: 100000
+  daily-disbursement: 50000
+  terms:
+    7: 0.05                # 7 天档，0.05%/日
+    30: 0.04               # 30 天档，0.04%/日
+  extension-days: 7        # 展期延长天数
+  extension-rate-bump-percent: 0.01   # 展期后日利率增加
+  penalty-percent: 0.1     # 逾期日罚息
+  reminder-days: 3         # 到期前提醒
+  write-off-after-days: 30 # 逾期核销天数
+  write-off-daily-cap: 5000 # 全服每日核销上限
+
+credit:
+  start: 600
+  max: 900
+  min: 300
+  on-time: 5
+  overdue: -20
+  default: -50
+
+# ------------------------------------------------------------
+# 账户等级（每月 1 号 00:00 重算；不允许用钱购买）
+# 评定维度：日均综合资产 + 累计有效流水 + 合规分
+# 综合资产 = 银行余额 + 钱包 + 共享均摊份额 − 未还贷款本金
+# 有效流水排除：自己给自己转、关联账号互转、共享账户内部划转。
+# 资产跌破门槛有 30 天缓冲期；合规分跌破阈值立即临时降级。
+# 红线（远程限额、税率、授信倍数）任何等级都不放开。
+# 数值含义：min-avg-assets 日均资产门槛；min-flow 30 天有效流水；
+# min-compliance 合规分；card-fee 等级工本费；terminal-single-limit 终端单笔；
+# fee-percent 转出手续费；session-minutes 终端会话时长；
+# history-limit 可查流水条数；interest-bonus-percent 存款利率加成。
+# ------------------------------------------------------------
+level:
+  flow-window-days: 30
+  asset-window-days: 30
+  grace-days: 30
+  eval-day-of-month: 1
+
+levels:
+  - key: normal
+    label: 普通
+    min-avg-assets: 0
+    min-flow: 0
+    min-compliance: 0
+    card-fee: 0
+    terminal-single-limit: 10000
+    fee-percent: 1.0
+    session-minutes: 5
+    history-limit: 20
+    interest-bonus-percent: 0
+  - key: silver
+    label: 银卡
+    min-avg-assets: 10000
+    min-flow: 50000
+    min-compliance: 80
+    card-fee: 200
+    terminal-single-limit: 12000
+    fee-percent: 0.9
+    session-minutes: 6
+    history-limit: 30
+    interest-bonus-percent: 0
+  - key: gold
+    label: 金卡
+    min-avg-assets: 50000
+    min-flow: 200000
+    min-compliance: 85
+    card-fee: 500
+    terminal-single-limit: 15000
+    fee-percent: 0.8
+    session-minutes: 8
+    history-limit: 50
+    interest-bonus-percent: 0.002
+  - key: platinum
+    label: 白金
+    min-avg-assets: 200000
+    min-flow: 800000
+    min-compliance: 90
+    card-fee: 1000
+    terminal-single-limit: 18000
+    fee-percent: 0.6
+    session-minutes: 10
+    history-limit: 80
+    interest-bonus-percent: 0.005
+  - key: black
+    label: 黑金
+    min-avg-assets: 500000
+    min-flow: 2000000
+    min-compliance: 95
+    card-fee: 2000
+    terminal-single-limit: 20000
+    fee-percent: 0.5
+    session-minutes: 15
+    history-limit: 100
+    interest-bonus-percent: 0.008
+
+# ------------------------------------------------------------
+# 自动备份：SQLite 使用 VACUUM INTO + PRAGMA integrity_check
+# MySQL 需要系统安装 mysqldump。
+# 备份目录：plugins/FiscalCraft/backups
+# ------------------------------------------------------------
+backup:
+  enabled: true
+  hour: 4
+  minute: 0
+  keep: 7
+
+# ------------------------------------------------------------
+# 财政池 / 系统发行
+# 所有费用与税收进入 system.treasury，用于活动奖励、货币回购、坏账核销对冲。
+# 利息优先由财政池支付，不足部分记为系统发行（INTEREST_ISSUANCE）。
+# ------------------------------------------------------------
+treasury:
+  enabled: true
+  pay-interest-first: true
