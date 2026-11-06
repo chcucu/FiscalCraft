@@ -162,6 +162,7 @@ public final class Models {
             long treasury,
             long arrears,
             long top10Assets,
+            double top10Share,
             double gini,
             int accounts,
             int activeLoans,

@@ -191,6 +191,7 @@ final class Schema {
                         "y INT NOT NULL," +
                         "z INT NOT NULL," +
                         "created_by VARCHAR(36) NOT NULL," +
+                        "terminal_type VARCHAR(20) NOT NULL DEFAULT 'full'," +
                         "created_at BIGINT NOT NULL" +
                         ") " + engine,
                 "CREATE TABLE IF NOT EXISTS meta (" +
@@ -211,6 +212,13 @@ final class Schema {
         };
         try (Statement st = con.createStatement()) {
             for (String sql : ddl) st.execute(sql);
+        }
+        // 旧版本数据库补列（重复列错误忽略）。
+        try (Statement st = con.createStatement()) {
+            st.execute("ALTER TABLE terminals ADD COLUMN terminal_type VARCHAR(20) NOT NULL DEFAULT 'full'");
+        } catch (SQLException e) {
+            String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(java.util.Locale.ROOT);
+            if (!message.contains("duplicate column") && !message.contains("already exists")) throw e;
         }
         for (String sql : indexes) {
             try (Statement st = con.createStatement()) {

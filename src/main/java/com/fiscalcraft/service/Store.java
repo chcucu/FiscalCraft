@@ -208,7 +208,9 @@ public final class Store {
     // ---------------------------------------------------------------- accounts
 
     public Account getAccount(Connection con, String uuid) throws SQLException {
-        try (PreparedStatement ps = con.prepareStatement("SELECT * FROM accounts WHERE player_uuid=?")) {
+        String sql = "SELECT * FROM accounts WHERE player_uuid=?"
+                + (db.isMysql() ? " FOR UPDATE" : "");
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
             ps.setString(1, uuid);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? account(rs) : null;
@@ -217,8 +219,9 @@ public final class Store {
     }
 
     public Account getAccountByName(Connection con, String name) throws SQLException {
-        try (PreparedStatement ps = con.prepareStatement(
-                "SELECT * FROM accounts WHERE LOWER(name)=LOWER(?) ORDER BY opened_at DESC LIMIT 1")) {
+        String sql = "SELECT * FROM accounts WHERE LOWER(name)=LOWER(?) ORDER BY opened_at DESC LIMIT 1"
+                + (db.isMysql() ? " FOR UPDATE" : "");
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
             ps.setString(1, name);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? account(rs) : null;
@@ -1352,23 +1355,26 @@ public final class Store {
 
     // ---------------------------------------------------------------- terminals / meta
 
-    public void addTerminal(Connection con, String key, String world, int x, int y, int z, String creator, long now) throws SQLException {
+    public void addTerminal(Connection con, String key, String world, int x, int y, int z,
+                            String terminalType, String creator, long now) throws SQLException {
         try (PreparedStatement ps = con.prepareStatement(
-                "SELECT 1 FROM terminals WHERE block_key=?")) {
-            ps.setString(1, key);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) return;
-            }
+                "UPDATE terminals SET terminal_type=?, created_by=?, created_at=? WHERE block_key=?")) {
+            ps.setString(1, terminalType);
+            ps.setString(2, creator);
+            ps.setLong(3, now);
+            ps.setString(4, key);
+            if (ps.executeUpdate() > 0) return;
         }
         try (PreparedStatement ps = con.prepareStatement(
-                "INSERT INTO terminals (block_key,world,x,y,z,created_by,created_at) VALUES (?,?,?,?,?,?,?)")) {
+                "INSERT INTO terminals (block_key,world,x,y,z,created_by,terminal_type,created_at) VALUES (?,?,?,?,?,?,?,?)")) {
             ps.setString(1, key);
             ps.setString(2, world);
             ps.setInt(3, x);
             ps.setInt(4, y);
             ps.setInt(5, z);
             ps.setString(6, creator);
-            ps.setLong(7, now);
+            ps.setString(7, terminalType);
+            ps.setLong(8, now);
             ps.executeUpdate();
         }
     }

@@ -76,6 +76,10 @@ public final class EconomyService {
 
     // ---------------------------------------------------------------- account lifecycle
 
+    public String openFeeText() {
+        return Money.format(cfg.openFee, cfg.currencySymbol);
+    }
+
     public Outcome openAccount(String uuid, String name, String pin, String question, String answer, String ip) {
         if (!PasswordHasher.validPin(pin, cfg.pinLength)) {
             return Outcome.fail("支付密码必须为 " + cfg.pinLength + " 位数字");
@@ -266,13 +270,24 @@ public final class EconomyService {
         if (!fee.ok()) return fee;
         String salt = PasswordHasher.salt();
         long now = time.now();
-        db.tx(con -> {
-            store.updatePin(con, uuid, PasswordHasher.hash(newPin, salt), salt);
-            store.clearAuth(con, "P:" + uuid);
-            if (ip != null && !ip.isBlank()) store.clearAuth(con, "IP:" + ip);
-            store.audit(con, uuid, "PIN_RESET", "fee=" + cfg.passwordResetFee, now);
-            return null;
-        });
+        try {
+            db.tx(con -> {
+                store.updatePin(con, uuid, PasswordHasher.hash(newPin, salt), salt);
+                store.clearAuth(con, "P:" + uuid);
+                if (ip != null && !ip.isBlank()) store.clearAuth(con, "IP:" + ip);
+                store.audit(con, uuid, "PIN_RESET", "fee=" + cfg.passwordResetFee, now);
+                return null;
+            });
+        } catch (RuntimeException e) {
+            logger.severe("密码重置写入失败，退费: " + e.getMessage());
+            wallet.deposit(uuid, cfg.passwordResetFee);
+            db.tx(con -> {
+                store.debitTreasury(con, cfg.passwordResetFee, time.now());
+                store.audit(con, uuid, "PIN_RESET_REFUND", "fee=" + cfg.passwordResetFee, time.now());
+                return null;
+            });
+            return Outcome.fail("密码重置失败，费用已退回钱包");
+        }
         return Outcome.ok("密码已重置，费用 " + Money.format(cfg.passwordResetFee, cfg.currencySymbol));
     }
 
@@ -343,7 +358,13 @@ public final class EconomyService {
             if (used + amount > dailyLimit) {
                 return Outcome.fail("超过当日累计限额，明日 00:00 重置");
             }
-            if (loans.inTPlusOne(con, payer)) return Outcome.fail("贷款放款 T+1 内禁止转出");
+            if (loans.inTPlusOne(con, payer)) {
+                if (amount >= cfg.mediumConfirmThreshold) {
+                    risk.logSuspicious(con, payer, "T1_OUTFLOW", amount, "T+1 内大额转出尝试");
+                    risk.flag(con, payer, "T1_OUTFLOW", "T+1 内大额转出", cfg.riskFlagExpireDays);
+                }
+                return Outcome.fail("贷款放款 T+1 内禁止转出");
+            }
             LoanService.Check loanCheck = loans.checkRelatedOutflow(con, payer, recipient, amount, now);
             if (!loanCheck.allowed()) return Outcome.fail(loanCheck.reason());
 
@@ -544,6 +565,9 @@ public final class EconomyService {
             if (store.getMember(con, sharedId, target.uuid()) == null) return Outcome.fail("只能划转给共享账户成员");
             SharedAccount shared = store.getShared(con, sharedId);
             if (shared == null || !shared.active()) return Outcome.fail("共享账户不存在");
+            if (tax.arrearsLocked(con, actor, now)) {
+                return Outcome.fail("欠税满 " + cfg.arrearsLockDays + " 天，共享账户功能锁定");
+            }
             if (loans.inTPlusOne(con, actor)) return Outcome.fail("贷款放款 T+1 内禁止共享划转");
             long limit = levels.terminalSingleLimit(con, actor);
             if (amount > limit) return Outcome.fail("超过终端单笔限额");
@@ -620,12 +644,23 @@ public final class EconomyService {
         if (!charged.ok()) return null;
         String cardNo = generateCardNo();
         long now = time.now();
-        db.tx(con -> {
-            store.setCardStatus(con, oldCardNo, "REVOKED");
-            store.insertCard(con, new Card(cardNo, uuid, now, "ACTIVE"));
-            store.audit(con, uuid, "CARD_REISSUE", oldCardNo + "->" + cardNo + " fee=" + fee, now);
+        try {
+            db.tx(con -> {
+                store.setCardStatus(con, oldCardNo, "REVOKED");
+                store.insertCard(con, new Card(cardNo, uuid, now, "ACTIVE"));
+                store.audit(con, uuid, "CARD_REISSUE", oldCardNo + "->" + cardNo + " fee=" + fee, now);
+                return null;
+            });
+        } catch (RuntimeException e) {
+            logger.severe("补办写卡失败，退费: " + e.getMessage());
+            wallet.deposit(uuid, fee);
+            db.tx(con -> {
+                store.debitTreasury(con, fee, time.now());
+                store.audit(con, uuid, "CARD_REISSUE_REFUND", oldCardNo + " fee=" + fee, time.now());
+                return null;
+            });
             return null;
-        });
+        }
         return new CardIssue(cardNo, fee, db.read(con -> levels.level(con, uuid)));
     }
 
@@ -733,6 +768,53 @@ public final class EconomyService {
         });
     }
 
+    /** 管理员全量流水追溯：不按玩家等级截断，附带双方与前后余额。 */
+    public List<String> adminHistory(String uuid, int requested) {
+        return db.read(con -> {
+            int limit = Math.min(Math.max(1, requested), 200);
+            List<String> lines = new ArrayList<>();
+            for (Tx tx : store.recentTransactions(con, uuid, limit)) {
+                lines.add(time.dayKey(LocalDate.ofInstant(java.time.Instant.ofEpochMilli(tx.ts()), time.zone()))
+                        + " " + tx.type() + " " + Money.format(tx.amount(), cfg.currencySymbol)
+                        + " from=" + shortId(tx.fromUuid()) + " to=" + shortId(tx.toUuid())
+                        + " 余额 " + amountOrDash(tx.fromBefore()) + "->" + amountOrDash(tx.fromAfter())
+                        + " / " + amountOrDash(tx.toBefore()) + "->" + amountOrDash(tx.toAfter())
+                        + (tx.reason() == null ? "" : " " + tx.reason()));
+            }
+            return lines;
+        });
+    }
+
+    private static String shortId(String uuid) {
+        if (uuid == null) return "-";
+        return uuid.length() > 8 ? uuid.substring(0, 8) : uuid;
+    }
+
+    private String amountOrDash(Long value) {
+        return value == null ? "-" : Money.format(value, cfg.currencySymbol);
+    }
+
+    /** 管理员从财政池发放活动奖励，直接进入已开户玩家的银行账户。 */
+    public Outcome treasuryGrant(String admin, String targetName, long amount, String reason) {
+        if (amount <= 0) return Outcome.fail("金额必须大于 0");
+        long now = time.now();
+        return db.tx(con -> {
+            Account target = store.getAccountByName(con, targetName);
+            if (target == null || !target.active()) return Outcome.fail("该玩家未开户");
+            if (store.treasury(con) < amount) return Outcome.fail("财政池余额不足");
+            store.debitTreasury(con, amount, now);
+            long before = target.balance();
+            long after = store.creditAccount(con, target.uuid(), amount);
+            store.insertTx(con, new Tx(Store.newId(), now, "TREASURY_GRANT", Store.TREASURY_ID,
+                    target.uuid(), amount, 0, null, null, before, after,
+                    "财政池发放: " + (reason == null || reason.isBlank() ? "活动奖励" : reason)));
+            store.audit(con, admin, "TREASURY_GRANT",
+                    target.uuid() + " " + amount + " " + (reason == null ? "" : reason), now);
+            return Outcome.ok("已从财政池向 " + target.name() + " 发放 "
+                    + Money.format(amount, cfg.currencySymbol));
+        });
+    }
+
     public Report report() {
         return db.read(con -> {
             List<PlayerData> players = store.allPlayers(con);
@@ -763,8 +845,9 @@ public final class EconomyService {
             long totalAssets = 0;
             for (long t : totals) totalAssets += t;
             long totalSupply = cash + bank + shared - loansOut;
+            double top10Share = totalAssets <= 0 ? 0 : (double) top10 / totalAssets;
             return new Report(totalSupply, cash, bank, shared, loansOut, store.treasury(con),
-                    store.totalOwedTax(con), top10, gini, (int) store.countAccounts(con),
+                    store.totalOwedTax(con), top10, top10Share, gini, (int) store.countAccounts(con),
                     (int) store.countLoans(con, "ACTIVE") + (int) store.countLoans(con, "OVERDUE"),
                     (int) store.countLoans(con, "OVERDUE"), store.suspiciousCount(con));
         });

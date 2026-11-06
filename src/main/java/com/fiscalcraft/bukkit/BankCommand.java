@@ -42,31 +42,31 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     private final FiscalCraftPlugin plugin;
     private final SessionManager sessions;
     private final TerminalManager terminals;
+    private final TerminalMarker markers;
     private final PromptManager prompts;
     private final CardItems cards;
     private final EconomyService economy;
     private final LevelService levels;
     private final LoanService loans;
     private final TaxService tax;
-    private final BackupService backup;
 
     private final Map<UUID, Pending> pending = new HashMap<>();
     private final Map<UUID, Long> closeConfirm = new HashMap<>();
     private final Map<UUID, CardOffer> cardOffers = new HashMap<>();
 
     public BankCommand(FiscalCraftPlugin plugin, SessionManager sessions, TerminalManager terminals,
-                       PromptManager prompts, CardItems cards, EconomyService economy, LevelService levels,
-                       LoanService loans, TaxService tax, BackupService backup) {
+                       TerminalMarker markers, PromptManager prompts, CardItems cards, EconomyService economy,
+                       LevelService levels, LoanService loans, TaxService tax) {
         this.plugin = plugin;
         this.sessions = sessions;
         this.terminals = terminals;
+        this.markers = markers;
         this.prompts = prompts;
         this.cards = cards;
         this.economy = economy;
         this.levels = levels;
         this.loans = loans;
         this.tax = tax;
-        this.backup = backup;
     }
 
     // ---------------------------------------------------------------- /pay
@@ -108,6 +108,38 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             return;
         }
         player.sendMessage(Component.text(result.message()));
+    }
+
+    private TerminalManager.Pos requireTerminal(Player player, String operation) {
+        TerminalManager.Pos terminal = terminals.nearest(player, 3.0);
+        if (terminal == null) {
+            player.sendMessage(Component.text("该操作只能在银行终端 3 格内办理，请靠近终端。"));
+            return null;
+        }
+        if (!terminal.type().allows(operation)) {
+            player.sendMessage(Component.text("当前是" + terminal.type().label() + "，不支持该操作（"
+                    + terminal.type().description() + "）。"));
+            return null;
+        }
+        return terminal;
+    }
+
+    private TerminalManager.Pos requireSession(Player player, String operation) {
+        if (!sessions.require(player)) return null;
+        SessionManager.Session session = sessions.session(player.getUniqueId());
+        if (session == null) return null;
+        TerminalType type = terminals.typeAt(session.world(), session.x(), session.y(), session.z());
+        if (type == null) {
+            sessions.invalidate(player.getUniqueId());
+            player.sendMessage(Component.text("该终端已被移除，会话失效。"));
+            return null;
+        }
+        if (!type.allows(operation)) {
+            player.sendMessage(Component.text("当前是" + type.label() + "，不支持该操作（"
+                    + type.description() + "）。"));
+            return null;
+        }
+        return new TerminalManager.Pos(session.world(), session.x(), session.y(), session.z(), type);
     }
 
     // ---------------------------------------------------------------- /bank
@@ -163,7 +195,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(Component.text("/bank balance|history [条数]|tax — 余额 / 流水 / 税务"));
         sender.sendMessage(Component.text("/bank loan apply <7|30> <金额> | status | extend"));
         sender.sendMessage(Component.text("/bank repay <金额|all> — 还贷"));
-        sender.sendMessage(Component.text("/bank card issue|reissue <卡号>|list|transfer <卡号> <玩家>|accept <卡号>|take <卡号>"));
+        sender.sendMessage(Component.text("/bank card issue|reissue <卡号>|list|transfer <卡号> <玩家>|accept <卡号>"));
         sender.sendMessage(Component.text("/bank shared create <family|couple|public> <名称>|join|leave|list|deposit|withdraw|transfer"));
         sender.sendMessage(Component.text("/bank reset — 密保重置密码（200）"));
         sender.sendMessage(Component.text("/bank upgrade — 查看/刷新等级评定"));
@@ -174,13 +206,11 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     // ---------------------------------------------------------------- 开户 / 销户
 
     private void open(Player player) {
-        if (!terminals.nearby(player, 3.0)) {
-            player.sendMessage(Component.text("开户只能在银行终端办理，请靠近终端（3 格内）。"));
-            return;
-        }
+        if (requireTerminal(player, "open") == null) return;
         String uuid = player.getUniqueId().toString();
         String name = player.getName();
         String ip = ipOf(player);
+        player.sendMessage(Component.text("开户费 " + money(plugin.config().openFee) + " 将从 Vault 钱包扣除。"));
         prompts.prompt(player, "请设置 6 位数字支付密码（逐条输入，仅用于校验）。", (p, pin) -> {
             if (!com.fiscalcraft.security.PasswordHasher.validPin(pin, plugin.config().pinLength)) {
                 p.sendMessage(Component.text("密码必须为 " + plugin.config().pinLength + " 位数字，请重新执行 /bank open。"));
@@ -201,7 +231,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     }
 
     private void close(Player player, String[] args) {
-        if (!sessions.require(player)) return;
+        if (requireSession(player, "close") == null) return;
         UUID uuid = player.getUniqueId();
         long now = System.currentTimeMillis();
         Long until = closeConfirm.get(uuid);
@@ -221,10 +251,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     // ---------------------------------------------------------------- 资金操作
 
     private void deposit(Player player, String[] args) {
-        if (!terminals.nearby(player, 3.0)) {
-            player.sendMessage(Component.text("存款只能在银行终端办理。"));
-            return;
-        }
+        if (requireTerminal(player, "deposit") == null) return;
         long amount = amount(player, args);
         if (amount <= 0) return;
         plugin.queue().submit("deposit", () -> economy.deposit(player.getUniqueId().toString(), amount),
@@ -232,7 +259,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     }
 
     private void withdraw(Player player, String[] args) {
-        if (!sessions.require(player)) return;
+        if (requireSession(player, "withdraw") == null) return;
         long amount = amount(player, args);
         if (amount <= 0) return;
         plugin.queue().submit("withdraw", () -> economy.withdraw(player.getUniqueId().toString(), amount),
@@ -240,7 +267,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     }
 
     private void transfer(Player player, String[] args) {
-        if (!sessions.require(player)) return;
+        if (requireSession(player, "transfer") == null) return;
         if (args.length < 3) {
             player.sendMessage(Component.text("用法: /bank transfer <玩家> <金额>"));
             return;
@@ -264,7 +291,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             player.sendMessage(Component.text("没有待确认的交易，或已超时。"));
             return;
         }
-        if (p.channel() == EconomyService.Channel.TERMINAL && !sessions.require(player)) {
+        if (p.channel() == EconomyService.Channel.TERMINAL && requireSession(player, "transfer") == null) {
             return;
         }
         plugin.queue().submit("confirm-transfer", () -> {
@@ -285,7 +312,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     // ---------------------------------------------------------------- 查询
 
     private void balance(Player player) {
-        if (!sessions.require(player)) return;
+        if (requireSession(player, "balance") == null) return;
         String uuid = player.getUniqueId().toString();
         plugin.queue().submit("balance", () -> {
             Account account = plugin.database().read(con -> plugin.store().getAccount(con, uuid));
@@ -302,7 +329,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     }
 
     private void history(Player player, String[] args) {
-        if (!sessions.require(player)) return;
+        if (requireSession(player, "history") == null) return;
         int limit = 20;
         if (args.length >= 2) {
             try {
@@ -321,7 +348,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     }
 
     private void taxInfo(Player player) {
-        if (!sessions.require(player)) return;
+        if (requireSession(player, "tax") == null) return;
         plugin.queue().submit("tax-info", () -> Outcome.ok(
                         String.join("\n", economy.taxInfo(player.getUniqueId().toString()))),
                 result -> sendLines(player, result));
@@ -330,7 +357,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     // ---------------------------------------------------------------- 贷款
 
     private void loan(Player player, String[] args) {
-        if (!sessions.require(player)) return;
+        if (requireSession(player, "loan") == null) return;
         String uuid = player.getUniqueId().toString();
         if (args.length < 2 || "status".equalsIgnoreCase(args[1])) {
             plugin.queue().submit("loan-status", () -> {
@@ -384,7 +411,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     }
 
     private void repay(Player player, String[] args) {
-        if (!sessions.require(player)) return;
+        if (requireSession(player, "repay") == null) return;
         if (args.length < 2) {
             player.sendMessage(Component.text("用法: /bank repay <金额|all>"));
             return;
@@ -409,7 +436,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
 
     private void card(Player player, String[] args) {
         if (args.length < 2) {
-            player.sendMessage(Component.text("用法: /bank card issue|reissue <卡号>|list|transfer <卡号> <玩家>|accept <卡号>|take <卡号>"));
+            player.sendMessage(Component.text("用法: /bank card issue|reissue <卡号>|list|transfer <卡号> <玩家>|accept <卡号>"));
             return;
         }
         final java.util.concurrent.atomic.AtomicReference<EconomyService.CardIssue> issued =
@@ -418,10 +445,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         String uuid = player.getUniqueId().toString();
         switch (action) {
             case "issue" -> {
-                if (!terminals.nearby(player, 3.0)) {
-                    player.sendMessage(Component.text("办卡只能在银行终端办理。"));
-                    return;
-                }
+                if (requireTerminal(player, "card") == null) return;
                 plugin.queue().submit("card-issue", () -> {
                     EconomyService.CardIssue issue = economy.issueCard(uuid);
                     if (issue == null) return Outcome.fail("办卡失败：余额不足、未开户或已达 5 张上限");
@@ -442,10 +466,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                     player.sendMessage(Component.text("用法: /bank card reissue <旧卡号>"));
                     return;
                 }
-                if (!terminals.nearby(player, 3.0)) {
-                    player.sendMessage(Component.text("补办只能在银行终端办理。"));
-                    return;
-                }
+                if (requireTerminal(player, "card") == null) return;
                 String old = args[2];
                 plugin.queue().submit("card-reissue", () -> {
                     EconomyService.CardIssue issue = economy.reissueCard(uuid, old);
@@ -470,27 +491,6 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                 }
                 return Outcome.ok(String.join("\n", lines));
             }, result -> sendLines(player, result));
-            case "take" -> {
-                if (args.length < 3) {
-                    player.sendMessage(Component.text("用法: /bank card take <卡号>"));
-                    return;
-                }
-                String cardNo = args[2];
-                plugin.queue().submit("card-take", () -> {
-                    Card card = economy.card(cardNo);
-                    if (card == null || !card.active() || !card.ownerUuid().equals(uuid)) {
-                        return Outcome.fail("卡号无效或不属于你");
-                    }
-                    return Outcome.ok("");
-                }, result -> {
-                    if (!result.ok()) {
-                        player.sendMessage(Component.text(result.message()));
-                        return;
-                    }
-                    player.getInventory().addItem(cards.create(cardNo, player.getName()));
-                    player.sendMessage(Component.text("已取出银行卡 " + cardNo));
-                });
-            }
             case "transfer" -> {
                 if (args.length < 4) {
                     player.sendMessage(Component.text("用法: /bank card transfer <卡号> <玩家>"));
@@ -502,6 +502,10 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                     return;
                 }
                 String cardNo = args[2];
+                if (countCardItems(player, cardNo) == 0) {
+                    player.sendMessage(Component.text("你背包中没有这张实体卡，无法转让。"));
+                    return;
+                }
                 plugin.queue().submit("card-transfer-offer", () -> {
                     Card card = economy.card(cardNo);
                     if (card == null || !card.active() || !card.ownerUuid().equals(uuid)) {
@@ -536,30 +540,49 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                     player.sendMessage(Component.text("转让方必须在线。"));
                     return;
                 }
+                List<ItemStack> physical = takeAllCardItems(sender, offer.cardNo());
+                if (physical.isEmpty()) {
+                    player.sendMessage(Component.text("转让方已不再持有该实体卡，转让取消。"));
+                    return;
+                }
                 cardOffers.remove(player.getUniqueId());
                 plugin.queue().submit("card-transfer", () ->
                                 economy.bindCardOwner(offer.senderUuid(), player.getName(), offer.cardNo()),
                         result -> {
-                            player.sendMessage(Component.text(result.message()));
-                            if (!result.ok()) return;
-                            ItemStack physical = takeCardItem(sender, offer.cardNo());
-                            if (physical != null) player.getInventory().addItem(physical);
+                            if (!result.ok()) {
+                                for (ItemStack item : physical) sender.getInventory().addItem(item);
+                                player.sendMessage(Component.text(result.message()));
+                                return;
+                            }
+                            player.getInventory().addItem(cards.create(offer.cardNo(), player.getName()));
+                            player.sendMessage(Component.text(result.message() + "，实体卡已交付。"));
+                            sender.sendMessage(Component.text("银行卡 " + offer.cardNo() + " 已转让给 "
+                                    + player.getName() + "。"));
                         });
             }
             default -> player.sendMessage(Component.text("未知的银行卡操作。"));
         }
     }
 
-    private ItemStack takeCardItem(Player player, String cardNo) {
+    private int countCardItems(Player player, String cardNo) {
+        int count = 0;
+        for (ItemStack item : player.getInventory().getContents()) {
+            if (item != null && cardNo.equals(cards.cardNo(item))) count++;
+        }
+        return count;
+    }
+
+    private List<ItemStack> takeAllCardItems(Player player, String cardNo) {
+        List<ItemStack> removed = new ArrayList<>();
         ItemStack[] contents = player.getInventory().getContents();
         for (int i = 0; i < contents.length; i++) {
             ItemStack item = contents[i];
             if (item != null && cardNo.equals(cards.cardNo(item))) {
                 player.getInventory().setItem(i, null);
-                return item;
+                removed.add(item);
             }
         }
-        return null;
+        return removed;
     }
 
     // ---------------------------------------------------------------- 共享账户
@@ -573,10 +596,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         String uuid = player.getUniqueId().toString();
         switch (action) {
             case "create" -> {
-                if (!terminals.nearby(player, 3.0)) {
-                    player.sendMessage(Component.text("创建共享账户只能在终端办理。"));
-                    return;
-                }
+                if (requireTerminal(player, "shared") == null) return;
                 if (args.length < 4) {
                     player.sendMessage(Component.text("用法: /bank shared create <family|couple|public> <名称>"));
                     return;
@@ -591,10 +611,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                     player.sendMessage(Component.text("用法: /bank shared join <编号>"));
                     return;
                 }
-                if (!terminals.nearby(player, 3.0)) {
-                    player.sendMessage(Component.text("加入共享账户只能在终端办理。"));
-                    return;
-                }
+                if (requireTerminal(player, "shared") == null) return;
                 String id = args[2];
                 plugin.queue().submit("shared-join", () -> economy.joinShared(uuid, id),
                         result -> player.sendMessage(Component.text(result.message())));
@@ -604,10 +621,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                     player.sendMessage(Component.text("用法: /bank shared leave <编号>"));
                     return;
                 }
-                if (!terminals.nearby(player, 3.0)) {
-                    player.sendMessage(Component.text("退出共享账户只能在终端办理。"));
-                    return;
-                }
+                if (requireTerminal(player, "shared") == null) return;
                 String id = args[2];
                 plugin.queue().submit("shared-leave", () -> economy.leaveShared(uuid, id),
                         result -> player.sendMessage(Component.text(result.message())));
@@ -624,7 +638,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                 return Outcome.ok(String.join("\n", lines));
             }, result -> sendLines(player, result));
             case "deposit" -> {
-                if (!sessions.require(player)) return;
+                if (requireSession(player, "shared") == null) return;
                 if (args.length < 4) {
                     player.sendMessage(Component.text("用法: /bank shared deposit <编号> <金额>"));
                     return;
@@ -636,7 +650,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                         result -> player.sendMessage(Component.text(result.message())));
             }
             case "withdraw" -> {
-                if (!sessions.require(player)) return;
+                if (requireSession(player, "shared") == null) return;
                 if (args.length < 4) {
                     player.sendMessage(Component.text("用法: /bank shared withdraw <编号> <金额>"));
                     return;
@@ -648,7 +662,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                         result -> player.sendMessage(Component.text(result.message())));
             }
             case "transfer" -> {
-                if (!sessions.require(player)) return;
+                if (requireSession(player, "shared") == null) return;
                 if (args.length < 5) {
                     player.sendMessage(Component.text("用法: /bank shared transfer <编号> <玩家> <金额>"));
                     return;
@@ -667,10 +681,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     // ---------------------------------------------------------------- 密码重置 / 等级
 
     private void reset(Player player) {
-        if (!terminals.nearby(player, 3.0)) {
-            player.sendMessage(Component.text("重置密码只能在银行终端办理。"));
-            return;
-        }
+        if (requireTerminal(player, "reset") == null) return;
         String uuid = player.getUniqueId().toString();
         String ip = ipOf(player);
         prompts.prompt(player, "请输入密保答案以验证身份。", (p, answer) -> {
@@ -689,7 +700,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     }
 
     private void upgrade(Player player) {
-        if (!sessions.require(player)) return;
+        if (requireSession(player, "upgrade") == null) return;
         String uuid = player.getUniqueId().toString();
         plugin.queue().submit("level", () -> {
             LevelService.Progress progress = economy.levelProgress(uuid);
@@ -716,7 +727,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             return true;
         }
         if (args.length < 2) {
-            sender.sendMessage(Component.text("/bank admin report|treasury|backup|terminal create|remove|unlock <玩家>|audit <玩家>|suspicious"));
+            sender.sendMessage(Component.text("/bank admin report|treasury|backup|terminal create <类型>|remove|unlock <玩家>|audit [玩家]|history <玩家>|suspicious"));
             return true;
         }
         String action = args[1].toLowerCase(Locale.ROOT);
@@ -730,13 +741,39 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                         + " / 欠税 " + money(report.arrears()));
                 lines.add("账户 " + report.accounts() + " / 活跃贷款 " + report.activeLoans()
                         + " / 逾期 " + report.overdueLoans() + " / 可疑记录 " + report.suspiciousCount());
-                lines.add("Top10 资产 " + money(report.top10Assets()) + " / 基尼系数约 " + String.format("%.3f", report.gini()));
+                lines.add("Top10 资产 " + money(report.top10Assets()) + " / 集中度 "
+                        + String.format("%.1f%%", report.top10Share() * 100) + " / 基尼系数约 "
+                        + String.format("%.3f", report.gini()));
                 return Outcome.ok(String.join("\n", lines));
             }, result -> sendLines(sender, result));
-            case "treasury" -> plugin.queue().submit("admin-treasury", () ->
-                    Outcome.ok("财政池 system.treasury = " + money(economy.treasury())),
-                    result -> sendLines(sender, result));
-            case "backup" -> plugin.queue().submit("admin-backup", () -> Outcome.ok(backup.run()),
+            case "treasury" -> {
+                if (args.length >= 3 && "grant".equalsIgnoreCase(args[2])) {
+                    if (args.length < 5) {
+                        sender.sendMessage(Component.text("用法: /bank admin treasury grant <玩家> <金额> [原因]"));
+                        return true;
+                    }
+                    long amount;
+                    try {
+                        amount = Money.parse(args[4]);
+                    } catch (IllegalArgumentException e) {
+                        sender.sendMessage(Component.text("金额错误: " + e.getMessage()));
+                        return true;
+                    }
+                    String name = args[3];
+                    String reason = args.length >= 6
+                            ? String.join(" ", Arrays.copyOfRange(args, 5, args.length)) : "活动奖励";
+                    plugin.queue().submit("admin-treasury-grant", () ->
+                            economy.treasuryGrant(sender.getName(), name, amount, reason),
+                            result -> sendLines(sender, result));
+                    return true;
+                }
+                plugin.queue().submit("admin-treasury", () ->
+                        Outcome.ok("财政池 system.treasury = " + money(economy.treasury())
+                                + "\n用法: /bank admin treasury grant <玩家> <金额> [原因]"),
+                        result -> sendLines(sender, result));
+            }
+            case "backup" -> plugin.queue().submit("admin-backup", () ->
+                    Outcome.ok(plugin.backupNow()),
                     result -> sendLines(sender, result));
             case "terminal" -> {
                 if (!(sender instanceof Player player)) {
@@ -744,7 +781,8 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                     return true;
                 }
                 if (args.length < 3) {
-                    player.sendMessage(Component.text("用法: /bank admin terminal <create|remove>（看向箱子/木桶）"));
+                    player.sendMessage(Component.text("用法: /bank admin terminal create <"
+                            + TerminalType.keys() + "> | remove（看向箱子/木桶）"));
                     return true;
                 }
                 Block block = player.getTargetBlockExact(6);
@@ -758,16 +796,34 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                 int y = block.getY();
                 int z = block.getZ();
                 if ("create".equalsIgnoreCase(args[2])) {
+                    TerminalType type = args.length >= 4 ? TerminalType.fromKey(args[3]) : TerminalType.FULL;
+                    if (type == null) {
+                        player.sendMessage(Component.text("终端类型必须为 " + TerminalType.keys()));
+                        return true;
+                    }
+                    TerminalType finalType = type;
                     plugin.queue().submit("terminal-create", () -> {
-                        terminals.addPos(world, x, y, z, player.getUniqueId().toString());
-                        return Outcome.ok("终端已创建");
-                    }, result -> player.sendMessage(Component.text(result.message())));
+                        TerminalManager.Pos pos = terminals.addPos(world, x, y, z, finalType,
+                                player.getUniqueId().toString());
+                        return Outcome.ok(pos.type().label() + " 已创建（" + pos.type().description() + "）");
+                    }, result -> {
+                        player.sendMessage(Component.text(result.message()));
+                        if (result.ok()) {
+                            TerminalManager.Pos pos = terminals.posAt(world, x, y, z);
+                            if (pos != null) markers.ensure(pos);
+                        }
+                    });
                 } else if ("remove".equalsIgnoreCase(args[2])) {
+                    TerminalManager.Pos existing = terminals.posAt(world, x, y, z);
                     plugin.queue().submit("terminal-delete", () -> terminals.removeKey(world, x, y, z)
                             ? Outcome.ok("终端已删除") : Outcome.fail("该方块不是银行终端"),
-                            result -> player.sendMessage(Component.text(result.message())));
+                            result -> {
+                                player.sendMessage(Component.text(result.message()));
+                                if (result.ok() && existing != null) markers.remove(existing);
+                            });
                 } else {
-                    player.sendMessage(Component.text("用法: /bank admin terminal <create|remove>"));
+                    player.sendMessage(Component.text("用法: /bank admin terminal create <"
+                            + TerminalType.keys() + "> | remove"));
                 }
             }
             case "unlock" -> {
@@ -804,6 +860,20 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
                     final String filter = actor;
                     List<String> lines = plugin.database().read(con -> plugin.store().auditLogs(con, filter, limit));
                     return Outcome.ok(lines.isEmpty() ? "无审计记录" : String.join("\n", lines));
+                }, result -> sendLines(sender, result));
+            }
+            case "history" -> {
+                if (args.length < 3) {
+                    sender.sendMessage(Component.text("用法: /bank admin history <玩家> [条数]"));
+                    return true;
+                }
+                String name = args[2];
+                int limit = args.length >= 4 ? parseInt(args[3], 50) : 50;
+                plugin.queue().submit("admin-history", () -> {
+                    Account account = plugin.database().read(con -> plugin.store().getAccountByName(con, name));
+                    if (account == null) return Outcome.fail("该玩家未开户");
+                    List<String> lines = economy.adminHistory(account.uuid(), limit);
+                    return Outcome.ok(lines.isEmpty() ? "暂无流水" : String.join("\n", lines));
                 }, result -> sendLines(sender, result));
             }
             case "suspicious" -> {

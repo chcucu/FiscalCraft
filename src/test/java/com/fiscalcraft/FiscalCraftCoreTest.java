@@ -1,5 +1,6 @@
 package com.fiscalcraft;
 
+import com.fiscalcraft.bukkit.TerminalType;
 import com.fiscalcraft.config.FiscalConfig;
 import com.fiscalcraft.db.Database;
 import com.fiscalcraft.model.Models.Account;
@@ -343,6 +344,23 @@ class FiscalCraftCoreTest {
         assertEquals(0L, h.bank(A));
         assertNull(h.db.read(con -> h.store.getAccount(con, A)), "销户后账户记录必须删除");
         h.close();
+    }
+
+    // ------------------------------------------------------------ 终端类型
+
+    @Test
+    void terminalTypesRestrictOperations() {
+        assertTrue(TerminalType.fromKey("full").allows("loan"));
+        assertTrue(TerminalType.fromKey("cash").allows("deposit"));
+        assertTrue(TerminalType.fromKey("cash").allows("withdraw"));
+        assertFalse(TerminalType.fromKey("cash").allows("loan"));
+        assertTrue(TerminalType.fromKey("loan").allows("repay"));
+        assertFalse(TerminalType.fromKey("loan").allows("deposit"));
+        assertTrue(TerminalType.fromKey("shared").allows("shared"));
+        assertFalse(TerminalType.fromKey("transfer").allows("shared"));
+        assertTrue(TerminalType.fromKey("account").allows("open"));
+        assertFalse(TerminalType.fromKey("account").allows("transfer"));
+        assertNull(TerminalType.fromKey("unknown"));
     }
 
     // ------------------------------------------------------------ 备份与还原

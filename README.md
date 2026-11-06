@@ -1,4 +1,4 @@
-# FiscalCraft 使用说明书（v1.0.0）
+# FiscalCraft 使用说明书（v1.0.1）
 
 > Paper 1.21.11 / Java 21 / Vault 经济系统插件
 > 功能：银行账户、存款利息、财富税与个税、共享账户、实体银行卡、账户等级、贷款征信、风控反洗钱、财政池与审计。
@@ -12,10 +12,10 @@
 git clone https://github.com/chcucu/FiscalCraft.git
 cd FiscalCraft
 mvn clean package
-# 产物：target/FiscalCraft-1.0.0.jar
+# 产物：target/FiscalCraft-1.0.1.jar
 ```
 
-要求 JDK 21、Maven 3.9+。单元测试：
+要求 JDK 21+、Maven 3.9+。单元测试：
 
 ```bash
 mvn test
@@ -37,7 +37,7 @@ mvn test
 
 ### 2. 安装
 
-1. 将 `FiscalCraft-1.0.0.jar` 放入服务端 `plugins/` 目录。
+1. 将 `FiscalCraft-1.0.1.jar` 放入服务端 `plugins/` 目录。
 2. 启动服务器一次，生成：
    - `plugins/FiscalCraft/config.yml`
    - `plugins/FiscalCraft/fiscalcraft.db`（SQLite 默认）
@@ -50,7 +50,7 @@ mvn test
    ```
 
 4. 按下方“权限配置”禁用 EssentialsX 自带的 `/pay` 与 `/loan`，保留 `/bal`。
-5. 在游戏内看向箱子/木桶执行 `/bank admin terminal create` 创建银行终端。
+5. 在游戏内看向箱子/木桶执行 `/bank admin terminal create <类型>` 创建银行终端（类型见“银行终端与会话”）。
 6. 重启或执行 `/reload` 后，让玩家右键终端开始使用。
 
 > 注意：`/bank` 的配置在启动时读取，修改 `config.yml` 后请重启服务器，避免经济参数热改造成账目不一致。
@@ -68,12 +68,13 @@ FiscalCraft 通过 `PlayerCommandPreprocessEvent` 接管 `/pay`，即使 Essenti
 
 ### 4. 首次使用流程
 
-1. 玩家右键银行终端 → 聊天框输入 6 位数字支付密码 → 建立会话（普通等级 5 分钟）。
+1. 新玩家右键银行终端：插件先检查账户，**不会要求输入密码**，而是提示“你还没有银行账户”，并引导输入 `/bank open`。
 2. 输入 `/bank open` → 依次设置支付密码、密保问题、密保答案 → 从 Vault 钱包扣开户费 500。
-3. `/bank deposit 100` 存款免密。
-4. `/bank withdraw 100` 使用当前终端会话。
-5. `/pay Bob 100` 远程转账：每次输入支付密码，单笔 2000、日累计 5000。
-6. 终端内 `/bank transfer Bob 100`：单笔上限按等级（普通 10000），日累计 20000。
+3. 已有账户的玩家右键终端才会要求输入 6 位支付密码（或手持银行卡免密），建立会话（普通等级 5 分钟）。
+4. `/bank deposit 100` 存款免密。
+5. `/bank withdraw 100` 使用当前终端会话。
+6. `/pay Bob 100` 远程转账：每次输入支付密码，单笔 2000、日累计 5000。
+7. 终端内 `/bank transfer Bob 100`：单笔上限按等级（普通 10000），日累计 20000。
 
 ---
 
@@ -81,7 +82,7 @@ FiscalCraft 通过 `PlayerCommandPreprocessEvent` 接管 `/pay`，即使 Essenti
 
 ### 1. 玩家指令
 
-所有 `/bank` 子命令都需要权限 `fiscalcraft.use`（默认开启）。带“终端”标记的指令必须在银行终端 3 格内执行。
+所有 `/bank` 子命令都需要权限 `fiscalcraft.use`（默认开启）。带“终端”标记的指令必须在银行终端 3 格内执行，并且要符合终端类型（见 4.3 终端类型表）。
 
 | 指令 | 说明 | 条件 |
 | --- | --- | --- |
@@ -102,9 +103,8 @@ FiscalCraft 通过 `PlayerCommandPreprocessEvent` 接管 `/pay`，即使 Essenti
 | `/bank card issue` | 办卡（800 + 等级工本费） | 终端 |
 | `/bank card reissue <旧卡号>` | 补办（200），旧卡作废，生成新卡号 | 终端 |
 | `/bank card list` | 查看自己的银行卡 | 无 |
-| `/bank card take <卡号>` | 重新取出实体卡物品（卡丢失/死亡后找回） | 无 |
-| `/bank card transfer <卡号> <玩家>` | 发起转让，对方需在线 | 无 |
-| `/bank card accept <卡号>` | 接受转让（2 分钟内） | 无 |
+| `/bank card transfer <卡号> <玩家>` | 发起转让，双方在线，转让方必须持有实体卡 | 无 |
+| `/bank card accept <卡号>` | 接受转让（2 分钟内），实体卡自动交付 | 无 |
 | `/bank shared create <family\|couple\|public> <名称>` | 创建共享账户（500） | 终端 |
 | `/bank shared join <编号>` | 加入共享账户 | 终端 |
 | `/bank shared leave <编号>` | 退出并返还均摊份额 | 终端 |
@@ -124,11 +124,13 @@ FiscalCraft 通过 `PlayerCommandPreprocessEvent` 接管 `/pay`，即使 Essenti
 
 | 指令 | 说明 |
 | --- | --- |
-| `/bank admin report` | 货币供应报表：总供应量、流通现金、银行存款、共享存款、贷款未还、财政池、欠税、账户数、活跃/逾期贷款、可疑记录、Top10 资产、基尼系数近似 |
-| `/bank admin treasury` | 查看财政池 `system.treasury` 余额 |
+| `/bank admin report` | 货币供应报表：总供应量、流通现金、银行存款、共享存款、贷款未还、财政池、欠税、账户数、活跃/逾期贷款、可疑记录、Top10 资产与集中度、基尼系数近似 |
+| `/bank admin treasury` | 查看财政池 `system.treasury` 余额与发放用法 |
+| `/bank admin treasury grant <玩家> <金额> [原因]` | 从财政池发放活动奖励到该玩家银行账户（会记流水与审计） |
 | `/bank admin backup` | 立即备份并执行完整性校验 |
-| `/bank admin terminal create` | 看向 6 格内箱子/木桶，创建终端 |
-| `/bank admin terminal remove` | 看向终端，删除终端 |
+| `/bank admin terminal create <类型>` | 看向 6 格内箱子/木桶，创建指定类型的终端；类型：`full`/`account`/`cash`/`transfer`/`loan`/`shared` |
+| `/bank admin terminal remove` | 看向终端，删除终端及其全息标识 |
+| `/bank admin history <玩家> [条数]` | 全量流水追溯：双方 UUID、金额、前后余额、原因（默认 50，最多 200） |
 | `/bank admin unlock <玩家>` | 清除该玩家的密码错误次数与锁定 |
 | `/bank admin audit [玩家] [条数]` | 查看审计日志（默认 50 条） |
 | `/bank admin suspicious [条数]` | 查看可疑交易日志（默认 30 条） |
@@ -206,11 +208,25 @@ FiscalCraft 通过 `PlayerCommandPreprocessEvent` 接管 `/pay`，即使 Essenti
 - 销户：需终端会话并二次确认；有未还贷款、欠税、仍在任一共享账户中会被拒绝；成功后余额强制转回钱包、银行卡全部吊销。
 - 取款、转账需要密码会话或实体卡会话；存款免密。
 
-### 3. 银行终端与会话
+### 3. 银行终端类型、标识与会话
 
-- 终端由管理员用指令把箱子/木桶/陷阱箱转换而来。
-- 右键终端：手持有效银行卡可免密登录；否则聊天框输入密码登录。
+- 管理员用 `/bank admin terminal create <类型>` 把箱子/木桶/陷阱箱转换为终端；类型如下：
+
+| 类型 key | 名称 | 可办理业务 |
+| --- | --- | --- |
+| `full` | 综合终端 | 全部银行业务 |
+| `account` | 开户终端 | 开户、销户、密码重置、银行卡、等级、余额/流水/税务 |
+| `cash` | 现金终端 | 存款、取款、余额/流水/税务 |
+| `transfer` | 转账终端 | 银行转账、余额/流水/税务 |
+| `loan` | 贷款终端 | 贷款申请、展期、还贷、额度查询、余额/流水/税务 |
+| `shared` | 共享终端 | 共享账户创建/加入/退出/存取/划转、余额/流水/税务 |
+
+- **明显标识**：每个终端上方有持久化全息文字（如“银行终端 · 现金终端 / 存款 / 取款 / 余额 / 流水 / 税务 / 右键使用”），并按终端类型每 2 秒生成彩色粒子；右键有提示音。全息标识在重启、区块重新加载后自动恢复，误删后每分钟自动补齐。
+- **新玩家首次右键**：插件先查询账户；未开户不会被要求输入密码，而是提示“你还没有银行账户”，并引导直接输入 `/bank open`（若当前终端不支持开户，会提示前往开户/综合终端）。
+- **已有账户右键**：手持本人有效银行卡可免密登录；否则聊天框输入 6 位支付密码。
+- 登录成功后消息会显示当前终端类型与可办业务；在不适配的终端执行指令会被拒绝，例如“当前是现金终端，不支持该操作”。
 - 会话绑定玩家 UUID + 方块坐标：每 tick 检查距离，超过 3 格立即失效；传送、切换世界、下线立即失效；最长时长按等级 5~15 分钟。
+- 拆除终端或终端方块被破坏时，全息标识同步删除。
 
 ### 4. 利息、财富税、个人所得税
 
@@ -222,7 +238,7 @@ FiscalCraft 通过 `PlayerCommandPreprocessEvent` 接管 `/pay`，即使 Essenti
 | 财富税 | 税基 = `max(0, 钱包 + 银行余额 + 共享均摊份额 − 未还贷款本金)`；仅对超过起征点部分按日税率征收。关联账号先合并总额再判断起征点。只从银行余额扣税，不足部分记欠税。 |
 | 个人所得税 | 仅对银行体系内“前一日收款 − 前一日付款”的正净额计征；存款、取款、利息、贷款本金、还本金不计税。 |
 | 欠税 | 扣税不足不扣成负数，记欠税；下次收入优先补缴；欠税满 7 天锁定共享账户功能。 |
-| 财政池 | 开户费、办卡费、手续费、税收均进入 `system.treasury`；管理员可查看，用于活动奖励、货币回购、坏账核销对冲。 |
+| 财政池 | 开户费、办卡费、手续费、税收均进入 `system.treasury`；管理员可查看、用 `/bank admin treasury grant` 发放活动奖励，并用于贷款坏账核销对冲。 |
 
 ### 5. 转账与限额
 
@@ -563,15 +579,21 @@ A：测试环境 Paper 132 控制台对带参数指令存在上游 `getLevel()` 
 **Q15：能修改 config 后热生效吗？**
 A：不能。经济参数在启动时加载，修改后请重启，避免结算口径不一致。
 
+**Q16：第一次右键终端为什么没让我输密码？**
+A：这是正确行为。插件会先检查是否开户；未开户玩家直接引导 `/bank open`，避免新玩家陷入“没有账户却要求登录”的死循环。已有账户右键才会要求输入密码。
+
+**Q17：为什么在某个终端存不了款/贷不了款？**
+A：终端已按业务拆分。现金终端只能存取，贷款终端只能贷款/还贷，转账终端只能转账；余额、流水、税务查询在所有终端通用。看不到所需业务时，请前往对应的功能终端或综合终端。
+
 ---
 
 ## 八、自测记录（交付前回归）
 
 ### 1. 构建与单元测试
 
-- 构建命令：`mvn -o test` / `mvn -o -DskipTests package`
-- 测试结果：`Tests run: 11, Failures: 0, Errors: 0, Skipped: 0`，`BUILD SUCCESS`
-- 产物：`FiscalCraft-1.0.0.jar`（约 19 MB，已内置 SQLite/MySQL 驱动与 bcrypt）
+- 构建命令：`mvn test` / `mvn -DskipTests package`
+- 测试结果：`Tests run: 12, Failures: 0, Errors: 0, Skipped: 0`，`BUILD SUCCESS`
+- 产物：`FiscalCraft-1.0.1.jar`（约 19 MB，已内置 SQLite/MySQL 驱动与 bcrypt）
 
 | 测试用例 | 覆盖内容 |
 | --- | --- |
@@ -585,6 +607,7 @@ A：不能。经济参数在启动时加载，修改后请重启，避免结算�
 | `levelGraceAndComplianceDowngrade` | 等级门槛评定、资产不足 30 天缓冲、合规分跌破立即降级 |
 | `dailyLimitAndArrearsRules` | 终端单笔/日累计限额、收款方欠税优先补缴 |
 | `closeAccountReturnsBalanceToWallet` | 销户余额强制转回钱包、账户记录删除 |
+| `terminalTypesRestrictOperations` | 综合/开户/现金/转账/贷款/共享终端的业务边界 |
 | `backupCanBeRestored` | 备份完整性校验通过；用备份替换数据库后余额一致 |
 
 ### 2. Paper 真实环境冒烟
@@ -621,4 +644,4 @@ plugins/FiscalCraft/
 
 ---
 
-**FiscalCraft v1.0.0** · 所有资金变动串行、可审计、可恢复。
+**FiscalCraft v1.0.1** · 所有资金变动串行、可审计、可恢复。

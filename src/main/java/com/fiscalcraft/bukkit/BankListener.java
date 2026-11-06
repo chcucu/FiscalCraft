@@ -5,6 +5,7 @@ import com.fiscalcraft.queue.Outcome;
 import com.fiscalcraft.service.EconomyService;
 import io.papermc.paper.event.player.ChatEvent;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
@@ -34,6 +35,7 @@ public final class BankListener implements Listener {
     private final FiscalCraftPlugin plugin;
     private final SessionManager sessions;
     private final TerminalManager terminals;
+    private final TerminalMarker markers;
     private final PromptManager prompts;
     private final CardItems cards;
     private final EconomyService economy;
@@ -41,10 +43,11 @@ public final class BankListener implements Listener {
     private final Map<UUID, List<ItemStack>> keptCards = new HashMap<>();
 
     public BankListener(FiscalCraftPlugin plugin, SessionManager sessions, TerminalManager terminals,
-                        PromptManager prompts, CardItems cards, EconomyService economy) {
+                        TerminalMarker markers, PromptManager prompts, CardItems cards, EconomyService economy) {
         this.plugin = plugin;
         this.sessions = sessions;
         this.terminals = terminals;
+        this.markers = markers;
         this.prompts = prompts;
         this.cards = cards;
         this.economy = economy;
@@ -137,6 +140,7 @@ public final class BankListener implements Listener {
     public void onBlockBreak(BlockBreakEvent event) {
         Block block = event.getBlock();
         if (!terminals.isTerminal(block)) return;
+        TerminalManager.Pos pos = terminals.pos(block);
         String world = block.getWorld().getName();
         int x = block.getX();
         int y = block.getY();
@@ -144,6 +148,8 @@ public final class BankListener implements Listener {
         plugin.queue().submit("terminal-remove", () -> {
             terminals.removeKey(world, x, y, z);
             return Outcome.ok("");
+        }, result -> {
+            if (result.ok() && pos != null) markers.remove(pos);
         });
         event.getPlayer().sendMessage(Component.text("银行终端已移除。"));
     }
@@ -164,8 +170,12 @@ public final class BankListener implements Listener {
             player.sendMessage(Component.text("银行系统正在初始化，请稍后再试。"));
             return;
         }
+        TerminalManager.Pos terminal = terminals.pos(block);
+        if (terminal == null) return;
+        player.playSound(block.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 0.7f, 1.4f);
         if (sessions.has(player)) {
-            player.sendMessage(Component.text("已连接银行终端，输入 /bank help 查看可用操作。"));
+            player.sendMessage(Component.text("已连接" + terminal.type().label() + "（"
+                    + terminal.type().description() + "），输入 /bank help 查看可用操作。"));
             return;
         }
         ItemStack hand = player.getInventory().getItemInMainHand();
@@ -178,28 +188,52 @@ public final class BankListener implements Listener {
                 if (result.ok()) {
                     int minutes = economy.sessionMinutes(player.getUniqueId().toString());
                     sessions.create(player, block, minutes);
-                    player.sendMessage(Component.text("银行卡验证通过，会话已建立。"));
+                    player.sendMessage(Component.text("银行卡验证通过，已连接" + terminal.type().label()
+                            + "（" + terminal.type().description() + "），会话 " + minutes + " 分钟。"));
                 } else {
                     player.sendMessage(Component.text(result.message()));
                 }
             });
             return;
         }
-        prompts.prompt(player, "请输入 6 位数字支付密码（仅用于校验）。", (p, input) -> {
-            plugin.queue().submit("terminal-login", () -> {
-                String ip = p.getAddress() == null ? "" : p.getAddress().getAddress().getHostAddress();
-                EconomyService.AuthOutcome auth = economy.verifyPin(p.getUniqueId().toString(), input, ip);
-                if (!auth.success()) return Outcome.fail(auth.message());
-                return Outcome.ok("");
-            }, result -> {
-                if (!result.ok()) {
-                    p.sendMessage(Component.text(result.message()));
-                    return;
+        // 先异步确认是否已开户：未开户玩家不应被要求输入支付密码，而是直接引导 /bank open。
+        String uuid = player.getUniqueId().toString();
+        plugin.queue().submit("terminal-account-check", () -> {
+            boolean hasAccount = plugin.database().read(con -> plugin.store().getAccount(con, uuid) != null);
+            return hasAccount ? Outcome.ok("") : Outcome.fail("");
+        }, result -> {
+            if (!result.ok()) {
+                player.sendMessage(Component.text("你还没有银行账户。当前终端：" + terminal.type().label()
+                        + "（" + terminal.type().description() + "）。"));
+                if (terminal.type().allows("open")) {
+                    player.sendMessage(Component.text("输入 ").append(Component.text("/bank open", NamedTextColor.WHITE))
+                            .append(Component.text(" 开户，开户费 " + economy.openFeeText() + " 从钱包扣除。")));
+                } else {
+                    player.sendMessage(Component.text("该终端不支持开户，请前往开户终端或综合终端办理。"));
                 }
-                int minutes = economy.sessionMinutes(p.getUniqueId().toString());
-                sessions.create(p, block, minutes);
-                p.sendMessage(Component.text("登录成功，会话有效 " + minutes + " 分钟，移动超过 3 格或传送将失效。"));
-            });
+                return;
+            }
+            prompts.prompt(player, "请输入 6 位数字支付密码（当前终端：" + terminal.type().label() + "）。",
+                    (p, input) -> {
+                        plugin.queue().submit("terminal-login", () -> {
+                            String ip = p.getAddress() == null ? ""
+                                    : p.getAddress().getAddress().getHostAddress();
+                            EconomyService.AuthOutcome auth = economy.verifyPin(
+                                    p.getUniqueId().toString(), input, ip);
+                            if (!auth.success()) return Outcome.fail(auth.message());
+                            return Outcome.ok("");
+                        }, login -> {
+                            if (!login.ok()) {
+                                p.sendMessage(Component.text(login.message()));
+                                return;
+                            }
+                            int minutes = economy.sessionMinutes(p.getUniqueId().toString());
+                            sessions.create(p, block, minutes);
+                            p.sendMessage(Component.text("登录成功，已连接" + terminal.type().label()
+                                    + "（" + terminal.type().description() + "），会话 " + minutes
+                                    + " 分钟；移动超过 3 格、传送或换世界将失效。"));
+                        });
+                    });
         });
     }
 }

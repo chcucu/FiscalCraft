@@ -7,6 +7,7 @@ import com.fiscalcraft.bukkit.CardItems;
 import com.fiscalcraft.bukkit.PromptManager;
 import com.fiscalcraft.bukkit.SessionManager;
 import com.fiscalcraft.bukkit.TerminalManager;
+import com.fiscalcraft.bukkit.TerminalMarker;
 import com.fiscalcraft.config.FiscalConfig;
 import com.fiscalcraft.db.Database;
 import com.fiscalcraft.queue.EconomyQueue;
@@ -29,6 +30,8 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * FiscalCraft 主类：装配所有核心服务，初始化在资金队列线程执行，主线程不做 JDBC。
@@ -50,11 +53,13 @@ public final class FiscalCraftPlugin extends JavaPlugin {
     private EconomyService economy;
     private SessionManager sessions;
     private TerminalManager terminals;
+    private TerminalMarker markers;
     private PromptManager prompts;
     private BackupService backup;
     private CardItems cards;
     private volatile boolean ready;
-    private String lastBackupDay;
+    private volatile String lastBackupDay;
+    private volatile String lastBackupAttemptDay;
 
     @Override
     public void onEnable() {
@@ -85,30 +90,34 @@ public final class FiscalCraftPlugin extends JavaPlugin {
 
         sessions = new SessionManager(this, config, time);
         terminals = new TerminalManager(this, store, database, time);
+        markers = new TerminalMarker(this, terminals);
         prompts = new PromptManager(this);
         cards = new CardItems(this);
         backup = new BackupService(getDataFolder(), getLogger(), database, config, time);
 
-        BankCommand command = new BankCommand(this, sessions, terminals, prompts, cards, economy,
-                levels, loans, tax, backup);
-        BankListener listener = new BankListener(this, sessions, terminals, prompts, cards, economy);
+        BankCommand command = new BankCommand(this, sessions, terminals, markers, prompts, cards, economy,
+                levels, loans, tax);
+        BankListener listener = new BankListener(this, sessions, terminals, markers, prompts, cards, economy);
         listener.bind(command);
         getServer().getPluginManager().registerEvents(listener, this);
+        getServer().getPluginManager().registerEvents(markers, this);
         if (getCommand("bank") != null) {
             getCommand("bank").setExecutor(command);
             getCommand("bank").setTabCompleter(command);
         }
 
+        List<String> startupNotices = new ArrayList<>();
         queue.submit("init", () -> {
             database.open();
             walletService.recoverPending();
             terminals.load();
+            lastBackupDay = database.read(con -> store.meta(con, "last_backup_day"));
             // 服务器跨日停机后补一次日结（0:00 定时任务只在运行期间触发）。
             String lastDay = database.read(con -> store.meta(con, "last_daily_day"));
             String today = time.dayKey();
             if (lastDay != null && lastDay.compareTo(today) < 0) {
                 tax.settleDaily();
-                loans.accrueDaily();
+                startupNotices.addAll(loans.accrueDaily().notices());
             }
             economy.evaluateLevels(false);
             return Outcome.ok("初始化完成");
@@ -120,6 +129,10 @@ public final class FiscalCraftPlugin extends JavaPlugin {
             }
             ready = true;
             startTasks();
+            markers.ensureAllLoaded();
+            for (String notice : startupNotices) {
+                notifyNotice(notice);
+            }
             getLogger().info("FiscalCraft 已就绪：数据库 " + (database.isMysql() ? "MySQL" : "SQLite(WAL)")
                     + "，资金操作单线程串行执行。");
         });
@@ -138,9 +151,27 @@ public final class FiscalCraftPlugin extends JavaPlugin {
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             sessions.tick();
             prompts.tick();
-        }, 20L, 20L);
+        }, 1L, 1L);
+        // 每 2 秒：终端彩色粒子标识。
+        Bukkit.getScheduler().runTaskTimer(this, markers::tickParticles, 40L, 40L);
+        // 每分钟补齐一次已加载区块的全息标识（防止实体被意外移除）。
+        Bukkit.getScheduler().runTaskTimer(this, markers::ensureAllLoaded, 1200L, 1200L);
         // 每分钟：日切、贷款计提、月度评级、自动备份。
         Bukkit.getScheduler().runTaskTimer(this, this::minuteTick, 60L, 60L);
+    }
+
+    /** 必须在资金队列线程执行：备份成功后持久化当日标记。 */
+    public String backupNow() {
+        String result = backup.run();
+        if (result.contains("成功")) {
+            String day = time.dayKey();
+            database.tx(con -> {
+                store.setMeta(con, "last_backup_day", day);
+                return null;
+            });
+            lastBackupDay = day;
+        }
+        return result;
     }
 
     private void minuteTick() {
@@ -162,13 +193,17 @@ public final class FiscalCraftPlugin extends JavaPlugin {
                 }
             });
         }
-        if (config.backupEnabled && now.getHour() == config.backupHour && now.getMinute() == config.backupMinute
-                && !time.dayKey().equals(lastBackupDay)) {
-            lastBackupDay = time.dayKey();
-            queue.submit("backup", () -> {
-                String result = backup.run();
-                return Outcome.ok(result);
-            }, outcome -> getLogger().info("自动备份: " + outcome.message()));
+        if (config.backupEnabled && now.getHour() >= config.backupHour
+                && !time.dayKey().equals(lastBackupDay)
+                && !time.dayKey().equals(lastBackupAttemptDay)) {
+            lastBackupAttemptDay = time.dayKey();
+            queue.submit("backup", () -> Outcome.ok(backupNow()), outcome -> {
+                if (outcome.ok() && outcome.message().contains("成功")) {
+                    getLogger().info("自动备份: " + outcome.message());
+                } else {
+                    getLogger().warning("自动备份失败: " + outcome.message());
+                }
+            });
         }
     }
 
